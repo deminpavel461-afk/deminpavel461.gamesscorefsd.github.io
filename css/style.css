@@ -471,6 +471,32 @@ body {
 	text-align: center;
 }
 
+@media (max-width: 650px) {
+	.stats-table--players {
+		border-collapse: separate;
+		border-spacing: 0;
+		min-width: 36rem;
+	}
+
+	.stats-table--players th:first-child,
+	.stats-table--players td:first-child {
+		position: sticky;
+		left: 0;
+		z-index: 2;
+		background: rgba(255, 255, 255, 0.96);
+		box-shadow: 4px 0 8px rgba(55, 75, 77, 0.12);
+	}
+
+	.stats-table--players th:first-child {
+		z-index: 3;
+		background: var(--action);
+	}
+
+	.stats-table--players tbody tr:hover td:first-child {
+		background: #e8eef0;
+	}
+}
+
 @media (max-width: 700px) {
 	.page {
 		padding: 1rem;
