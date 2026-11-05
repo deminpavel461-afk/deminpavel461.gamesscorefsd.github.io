@@ -4,7 +4,7 @@
 		"Сан Саныч",
 		"Андрей Русских",
 		"Стас Бушуев",
-		"Паша Демин",
+		"DedPool",
 		"Паша Шерр",
 		"ZAZUZAZI",
 	];
@@ -20,7 +20,7 @@
 
 	const ADMIN = {
 		login: "Володя Гаврилюк",
-		password: "хуйкин",
+		password: "admin",
 	};
 
 	const AUTH_STORAGE_KEY = "gamesScoreAuth";
