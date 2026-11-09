@@ -1,13 +1,7 @@
 (function () {
-	const PLAYERS = [
-		"Вова Гаврилюк",
-		"Сан Саныч",
-		"Андрей Русских",
-		"Стас Бушуев",
-		"DedPool",
-		"Паша Шерр",
-		"ZAZUZAZI",
-	];
+	const API_BASE = "";
+	const AUTH_STORAGE_KEY = "gamesScoreAuth";
+	const PAYOUT_COUNTS = [7, 6, 5, 4];
 
 	const DEFAULT_PAYOUTS = {
 		7: { first: 600, second: 150, other: -150 },
@@ -15,16 +9,6 @@
 		5: { first: 450, second: 0, other: -150 },
 		4: { first: 450, second: -150, other: -150 },
 	};
-
-	const PAYOUT_COUNTS = [7, 6, 5, 4];
-
-	const ADMIN = {
-		login: "Володя Гаврилюк",
-		password: "admin",
-	};
-
-	const AUTH_STORAGE_KEY = "gamesScoreAuth";
-	const PAYOUTS_STORAGE_KEY = "gamesScorePayouts";
 
 	const gamesAdminActions = document.getElementById("games-admin-actions");
 	const addGameBtn = document.getElementById("add-game-btn");
@@ -63,15 +47,16 @@
 	const payoutsError = document.getElementById("payouts-error");
 	const cancelPayoutsBtn = document.getElementById("cancel-payouts-btn");
 
-	const games = [];
-	let nextGameId = 1;
+	let players = [];
+	let games = [];
 	let currentUser = null;
+	let authToken = null;
 	let payouts = clonePayouts(DEFAULT_PAYOUTS);
 
 	function clonePayouts(source) {
 		const result = {};
 		PAYOUT_COUNTS.forEach(function (count) {
-			const row = source[count] || DEFAULT_PAYOUTS[count];
+			const row = (source && (source[count] || source[String(count)])) || DEFAULT_PAYOUTS[count];
 			result[count] = {
 				first: Number(row.first),
 				second: Number(row.second),
@@ -82,7 +67,7 @@
 	}
 
 	function isAdmin() {
-		return currentUser === ADMIN.login;
+		return Boolean(currentUser);
 	}
 
 	function normalizeLogin(value) {
@@ -103,59 +88,117 @@
 		}
 	}
 
-	function saveAuth(login, remember) {
+	function saveAuth(token, login, remember) {
 		if (!remember) {
+			sessionStorage.setItem(
+				AUTH_STORAGE_KEY,
+				JSON.stringify({ token: token, login: login, remember: false })
+			);
 			localStorage.removeItem(AUTH_STORAGE_KEY);
 			return;
 		}
+		sessionStorage.removeItem(AUTH_STORAGE_KEY);
 		localStorage.setItem(
 			AUTH_STORAGE_KEY,
 			JSON.stringify({
+				token: token,
 				login: login,
 				remember: true,
 			})
 		);
 	}
 
-	function clearAuth() {
+	function clearAuthStorage() {
 		localStorage.removeItem(AUTH_STORAGE_KEY);
+		sessionStorage.removeItem(AUTH_STORAGE_KEY);
 	}
 
-	function restoreAuth() {
-		const stored = readStoredAuth();
-		if (stored && stored.remember && normalizeLogin(stored.login) === ADMIN.login) {
-			currentUser = ADMIN.login;
-		}
-	}
-
-	function readStoredPayouts() {
-		try {
-			const raw = localStorage.getItem(PAYOUTS_STORAGE_KEY);
-			if (!raw) {
+	function restoreAuthLocal() {
+		const stored = readStoredAuth() || (function () {
+			try {
+				return JSON.parse(sessionStorage.getItem(AUTH_STORAGE_KEY) || "null");
+			} catch (error) {
 				return null;
 			}
-			return JSON.parse(raw);
-		} catch (error) {
-			return null;
+		})();
+
+		if (stored && stored.token && stored.login) {
+			authToken = stored.token;
+			currentUser = stored.login;
+			return stored;
+		}
+		authToken = null;
+		currentUser = null;
+		return null;
+	}
+
+	async function api(pathname, options) {
+		const opts = options || {};
+		const headers = Object.assign(
+			{ Accept: "application/json" },
+			opts.headers || {}
+		);
+
+		if (opts.body !== undefined) {
+			headers["Content-Type"] = "application/json";
+		}
+		if (authToken) {
+			headers.Authorization = "Bearer " + authToken;
+		}
+
+		const response = await fetch(API_BASE + pathname, {
+			method: opts.method || "GET",
+			headers: headers,
+			body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+		});
+
+		let data = null;
+		const text = await response.text();
+		if (text) {
+			try {
+				data = JSON.parse(text);
+			} catch (error) {
+				data = { error: text };
+			}
+		}
+
+		if (!response.ok) {
+			const message = (data && data.error) || "Ошибка запроса";
+			const err = new Error(message);
+			err.status = response.status;
+			throw err;
+		}
+
+		return data || {};
+	}
+
+	function applyState(data) {
+		players = Array.isArray(data.players) ? data.players.slice() : [];
+		games = Array.isArray(data.games) ? data.games.slice() : [];
+		payouts = clonePayouts(data.payouts || DEFAULT_PAYOUTS);
+
+		if (data.user && data.user.login) {
+			currentUser = data.user.login;
+		} else if (!authToken) {
+			currentUser = null;
 		}
 	}
 
-	function savePayouts() {
-		localStorage.setItem(PAYOUTS_STORAGE_KEY, JSON.stringify(payouts));
-	}
-
-	function restorePayouts() {
-		const stored = readStoredPayouts();
-		if (!stored) {
-			payouts = clonePayouts(DEFAULT_PAYOUTS);
-			return;
+	async function loadState() {
+		const data = await api("/api/state");
+		if (!data.user) {
+			authToken = null;
+			currentUser = null;
+			clearAuthStorage();
+		} else {
+			currentUser = data.user.login;
 		}
-		payouts = clonePayouts(stored);
+		applyState(data);
 	}
 
 	function createEmptyStats() {
 		const result = {};
-		PLAYERS.forEach(function (name) {
+		players.forEach(function (name) {
 			result[name] = {
 				first: 0,
 				second: 0,
@@ -199,7 +242,7 @@
 	}
 
 	function getPrizes(playerCount) {
-		const row = payouts[playerCount];
+		const row = payouts[playerCount] || payouts[String(playerCount)];
 		if (!row) {
 			return null;
 		}
@@ -248,7 +291,7 @@
 		payoutsEditBody.innerHTML = PAYOUT_COUNTS.map(function (count) {
 			const row = payouts[count];
 			return (
-				"<tr data-count=\"" +
+				'<tr data-count="' +
 				count +
 				'">' +
 				"<td>" +
@@ -427,6 +470,9 @@
 				if (name === game.first || name === game.second) {
 					return;
 				}
+				if (!stats[name]) {
+					return;
+				}
 				stats[name].outOfPrizes += 1;
 				stats[name].total += prizes.other;
 			});
@@ -437,7 +483,8 @@
 
 	function renderStats() {
 		const stats = recalculateStats();
-		const rows = PLAYERS.slice()
+		const rows = players
+			.slice()
 			.sort(function (a, b) {
 				const diff = stats[b].total - stats[a].total;
 				if (diff !== 0) {
@@ -554,7 +601,7 @@
 		confirmBtn.textContent = "Сохранить";
 		dateInput.value = game.date;
 		setSelectedPlayers(game.players);
-		selectAll.checked = game.players.length === PLAYERS.length;
+		selectAll.checked = game.players.length === players.length;
 		selectAll.indeterminate = false;
 		updatePlaceSelects(game.first, game.second);
 		hideError();
@@ -575,25 +622,27 @@
 	}
 
 	function renderPlayers() {
-		playersList.innerHTML = PLAYERS.map(function (name, index) {
-			const id = "player-" + index;
-			return (
-				"<li>" +
-				'<label class="check" for="' +
-				id +
-				'">' +
-				'<input type="checkbox" id="' +
-				id +
-				'" name="players" value="' +
-				name.replace(/"/g, "&quot;") +
-				'" />' +
-				"<span>" +
-				name +
-				"</span>" +
-				"</label>" +
-				"</li>"
-			);
-		}).join("");
+		playersList.innerHTML = players
+			.map(function (name, index) {
+				const id = "player-" + index;
+				return (
+					"<li>" +
+					'<label class="check" for="' +
+					id +
+					'">' +
+					'<input type="checkbox" id="' +
+					id +
+					'" name="players" value="' +
+					name.replace(/"/g, "&quot;") +
+					'" />' +
+					"<span>" +
+					name +
+					"</span>" +
+					"</label>" +
+					"</li>"
+				);
+			})
+			.join("");
 	}
 
 	function openModal() {
@@ -662,7 +711,7 @@
 		renderGames();
 	}
 
-	function clearGames() {
+	async function clearGames() {
 		if (!isAdmin()) {
 			return;
 		}
@@ -676,9 +725,13 @@
 			return;
 		}
 
-		games.length = 0;
-		nextGameId = 1;
-		refresh();
+		try {
+			const data = await api("/api/games", { method: "DELETE" });
+			games = Array.isArray(data.games) ? data.games : [];
+			refresh();
+		} catch (error) {
+			window.alert(error.message || "Не удалось очистить игры");
+		}
 	}
 
 	function openLoginModal() {
@@ -703,10 +756,20 @@
 		hideLoginError();
 	}
 
-	function logout() {
+	async function logout() {
+		try {
+			if (authToken) {
+				await api("/api/auth/logout", { method: "POST", body: {} });
+			}
+		} catch (error) {
+			// ignore network logout errors
+		}
+
 		currentUser = null;
-		clearAuth();
+		authToken = null;
+		clearAuthStorage();
 		updateAuthUi();
+
 		if (typeof modal.close === "function" && modal.open) {
 			modal.close();
 		}
@@ -715,16 +778,37 @@
 		}
 	}
 
-	restoreAuth();
-	restorePayouts();
-	renderPlayers();
-	refresh();
-	updateAuthUi();
+	async function init() {
+		restoreAuthLocal();
+
+		try {
+			await loadState();
+		} catch (error) {
+			players = [
+				"Вова Гаврилюк",
+				"Сан Саныч",
+				"Андрей Русских",
+				"Стас Бушуев",
+				"DedPool",
+				"Паша Шерр",
+				"ZAZUZAZI",
+			];
+			games = [];
+			payouts = clonePayouts(DEFAULT_PAYOUTS);
+			window.alert(
+				"Не удалось подключиться к серверу. Запустите start.bat или npm start и откройте http://localhost:3000"
+			);
+		}
+
+		renderPlayers();
+		refresh();
+		updateAuthUi();
+	}
 
 	editPayoutsBtn.addEventListener("click", openPayoutsModal);
 	cancelPayoutsBtn.addEventListener("click", closePayoutsModal);
 
-	payoutsForm.addEventListener("submit", function (event) {
+	payoutsForm.addEventListener("submit", async function (event) {
 		event.preventDefault();
 
 		if (!isAdmin()) {
@@ -758,10 +842,17 @@
 			};
 		}
 
-		payouts = clonePayouts(nextPayouts);
-		savePayouts();
-		refresh();
-		closePayoutsModal();
+		try {
+			const data = await api("/api/payouts", {
+				method: "PUT",
+				body: { payouts: nextPayouts },
+			});
+			payouts = clonePayouts(data.payouts || nextPayouts);
+			refresh();
+			closePayoutsModal();
+		} catch (error) {
+			showPayoutsError(error.message || "Не удалось сохранить выплаты");
+		}
 	});
 
 	payoutsModal.addEventListener("cancel", hidePayoutsError);
@@ -776,7 +867,7 @@
 
 	cancelLoginBtn.addEventListener("click", closeLoginModal);
 
-	loginForm.addEventListener("submit", function (event) {
+	loginForm.addEventListener("submit", async function (event) {
 		event.preventDefault();
 
 		const name = normalizeLogin(loginName.value);
@@ -788,15 +879,24 @@
 			return;
 		}
 
-		if (name !== ADMIN.login || password !== ADMIN.password) {
-			showLoginError("Неверный логин или пароль");
-			return;
-		}
+		try {
+			const data = await api("/api/auth/login", {
+				method: "POST",
+				body: {
+					login: name,
+					password: password,
+					remember: remember,
+				},
+			});
 
-		currentUser = ADMIN.login;
-		saveAuth(ADMIN.login, remember);
-		updateAuthUi();
-		closeLoginModal();
+			authToken = data.token;
+			currentUser = data.user.login;
+			saveAuth(authToken, currentUser, remember);
+			updateAuthUi();
+			closeLoginModal();
+		} catch (error) {
+			showLoginError(error.message || "Неверный логин или пароль");
+		}
 	});
 
 	loginModal.addEventListener("cancel", hideLoginError);
@@ -837,7 +937,7 @@
 		openEditModal(button.getAttribute("data-edit-id"));
 	});
 
-	form.addEventListener("submit", function (event) {
+	form.addEventListener("submit", async function (event) {
 		event.preventDefault();
 
 		if (!isAdmin()) {
@@ -879,33 +979,30 @@
 		};
 
 		const editingId = editingIdInput.value;
-		if (editingId) {
-			const index = findGameIndex(editingId);
-			if (index === -1) {
-				showError("Игра не найдена");
-				return;
-			}
-			games[index] = {
-				id: games[index].id,
-				date: payload.date,
-				players: payload.players,
-				first: payload.first,
-				second: payload.second,
-			};
-		} else {
-			games.push({
-				id: nextGameId,
-				date: payload.date,
-				players: payload.players,
-				first: payload.first,
-				second: payload.second,
-			});
-			nextGameId += 1;
-		}
 
-		refresh();
-		closeModal();
+		try {
+			let data;
+			if (editingId) {
+				data = await api("/api/games/" + encodeURIComponent(editingId), {
+					method: "PUT",
+					body: payload,
+				});
+			} else {
+				data = await api("/api/games", {
+					method: "POST",
+					body: payload,
+				});
+			}
+
+			games = Array.isArray(data.games) ? data.games : games;
+			refresh();
+			closeModal();
+		} catch (error) {
+			showError(error.message || "Не удалось сохранить игру");
+		}
 	});
 
 	modal.addEventListener("cancel", hideError);
+
+	init();
 })();
